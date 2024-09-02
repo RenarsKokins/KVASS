@@ -24,6 +24,9 @@ GPATH
 # cache dir
 .cache/
 
+# Docker stuff
+.devcontainer
+
 # Doc build artifacts
 docs/_build/
 docs/doxygen_sqlite3.db
