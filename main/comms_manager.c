@@ -1,9 +1,12 @@
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "tusb_cdc_acm.h"
 #include "tusb_console.h"
 
+#include "common_kvass.h"
 #include "comms_manager.h"
 
 /* A combination of interfaces must have a unique product id, since PC will save device driver after the first plug.
@@ -96,8 +99,13 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     ESP_LOGI(TAG_COMMS, "Set report: instance: %d, report_id: %d, report_type: %d, buffer: %d, bufsize: %d", instance, report_id, report_type, buffer[0], bufsize);
 }
 
-void doUSBCommunication(struct CommsParameters *commsParameters)
+void doUSBCommunication(struct GodParameters *godParameters)
 {
+    BaseType_t xResult;
+    uint32_t notifyValue = 0;
+    struct MouseData mouseData = {0};
+    struct KeyboardData kbData = {0};
+    struct CommsParameters *commsParams = (struct CommsParameters *)godParameters->commsParameters;
     ESP_LOGI(TAG_COMMS, "USB communication selected");
 
     // Setup HID config
@@ -123,8 +131,12 @@ void doUSBCommunication(struct CommsParameters *commsParameters)
     // Send data to host device
     while (1)
     {
+        xResult = xTaskNotifyWait(pdFALSE,      /* Don't clear bits on entry. */
+                                  UINT32_MAX,   /* Clear bits on exit. */
+                                  &notifyValue, /* Stores the notified value. */
+                                  portMAX_DELAY);
         // If protocol changed, break out
-        if (xSemaphoreTake(commsParameters->protocolChanged, 0) == pdTRUE)
+        if (xResult == pdTRUE && (notifyValue & NOTIF_PROTOCOL_CHANGED) != 0)
         {
             break;
         }
@@ -133,33 +145,44 @@ void doUSBCommunication(struct CommsParameters *commsParameters)
         if (tud_mounted())
         {
             // block unitl HID has data
-            if (xSemaphoreTake(commsParameters->hidChanged, pdMS_TO_TICKS(500)) == pdTRUE)
+            if (xResult == pdTRUE && (notifyValue & NOTIF_KEYB_CHANGED) != 0)
             {
-                tud_hid_keyboard_report(
-                    HID_ITF_PROTOCOL_KEYBOARD,
-                    commsParameters->commsData.modifier,
-                    commsParameters->commsData.keycode);
-
-                tud_hid_mouse_report(
-                    HID_ITF_PROTOCOL_MOUSE,
-                    commsParameters->commsData.button,
-                    commsParameters->commsData.delta_x,
-                    commsParameters->commsData.delta_x,
-                    commsParameters->commsData.scroll_vertical,
-                    commsParameters->commsData.scroll_horizontal);
-
-                ESP_LOGI(TAG_COMMS, "Sent keyboard & mouse report!");
-                ESP_LOGI(TAG_COMMS, "Mouse button: %d, x: %d, y:, %d",
-                commsParameters->commsData.button,
-                commsParameters->commsData.delta_x,
-                commsParameters->commsData.delta_y);
-
-                ESP_LOGI(TAG_COMMS, "Keyboard mod: %d, buffer: ", commsParameters->commsData.modifier);
-                for (int i = 0; i < KB_BUFFER_SIZE; i++)
+                xResult = xQueueReceive(commsParams->commsData.keyboardQueue, &kbData, 10);
+                if (xResult == pdTRUE)
                 {
-                    printf("%u", commsParameters->commsData.keycode[i]);
+                    tud_hid_keyboard_report(
+                        HID_ITF_PROTOCOL_KEYBOARD,
+                        kbData.modifier,
+                        kbData.keycode);
+
+                    // ESP_LOGI(TAG_COMMS, "Sent keyboard report!");
+                    // ESP_LOGI(TAG_COMMS, "Keyboard mod: %d, buffer: ", kbData.modifier);
+                    // for (int i = 0; i < KB_BUFFER_SIZE; i++)
+                    // {
+                    //     printf("%u", kbData.keycode[i]);
+                    // }
+                    // printf("\n");
                 }
-                printf("\n");
+            }
+            else if (xResult == pdTRUE && (notifyValue & NOTIF_MOUSE_CHANGED) != 0)
+            {
+                xResult = xQueueReceive(commsParams->commsData.mouseQueue, &mouseData, 10);
+                if (xResult == pdTRUE)
+                {
+                    tud_hid_mouse_report(
+                        HID_ITF_PROTOCOL_MOUSE,
+                        mouseData.button,
+                        mouseData.delta_x,
+                        mouseData.delta_y,
+                        mouseData.scroll_vertical,
+                        mouseData.scroll_horizontal);
+
+                    // ESP_LOGI(TAG_COMMS, "Sent mouse report!");
+                    // ESP_LOGI(TAG_COMMS, "Mouse button: %d, x: %d, y:, %d",
+                    //          mouseData.button,
+                    //          mouseData.delta_x,
+                    //          mouseData.delta_y);
+                }
             }
         }
     }
@@ -168,12 +191,20 @@ void doUSBCommunication(struct CommsParameters *commsParameters)
     ESP_ERROR_CHECK(tinyusb_driver_uninstall());
 }
 
-void doBluetoothCommunication(struct CommsParameters *commsParameters)
+void doBluetoothCommunication(struct GodParameters *godParameters)
 {
+    BaseType_t xResult;
+    uint32_t notifyValue = 0;
+    struct CommsParameters *commsParams = (struct CommsParameters *)godParameters->commsParameters;
+
     ESP_LOGI(TAG_COMMS, "Bluetooth communication selected");
     while (1)
     {
-        if (xSemaphoreTake(commsParameters->protocolChanged, portMAX_DELAY) == pdTRUE)
+        xResult = xTaskNotifyWait(pdFALSE,                /* Don't clear bits on entry. */
+                                  NOTIF_PROTOCOL_CHANGED, /* Clear notif bit on exit. */
+                                  &notifyValue,           /* Stores the notified value. */
+                                  portMAX_DELAY);
+        if (xResult == pdPASS && (notifyValue & NOTIF_PROTOCOL_CHANGED) != 0)
         {
             break;
         }
@@ -181,12 +212,20 @@ void doBluetoothCommunication(struct CommsParameters *commsParameters)
     }
 }
 
-void doESPNOWCommunication(struct CommsParameters *commsParameters)
+void doESPNOWCommunication(struct GodParameters *godParameters)
 {
+    BaseType_t xResult;
+    uint32_t notifyValue = 0;
+    struct CommsParameters *commsParams = (struct CommsParameters *)godParameters->commsParameters;
+
     ESP_LOGI(TAG_COMMS, "ESPNOW communication selected");
     while (1)
     {
-        if (xSemaphoreTake(commsParameters->protocolChanged, portMAX_DELAY) == pdTRUE)
+        xResult = xTaskNotifyWait(pdFALSE,                /* Don't clear bits on entry. */
+                                  NOTIF_PROTOCOL_CHANGED, /* Clear notif bit on exit. */
+                                  &notifyValue,           /* Stores the notified value. */
+                                  portMAX_DELAY);
+        if (xResult == pdPASS && (notifyValue & NOTIF_PROTOCOL_CHANGED) != 0)
         {
             break;
         }
@@ -194,26 +233,45 @@ void doESPNOWCommunication(struct CommsParameters *commsParameters)
     }
 }
 
-void waitForProtocolChange(struct CommsParameters *commsParameters)
+void waitForProtocolChange(struct GodParameters *godParameters)
 {
+    BaseType_t xResult;
+    uint32_t notifyValue = 0;
+    struct CommsParameters *commsParams = (struct CommsParameters *)godParameters->commsParameters;
+
     ESP_LOGI(TAG_COMMS, "No communication protocol selected, will wait for protocol change");
-    while(1)
-    {
-        if (xSemaphoreTake(commsParameters->protocolChanged, portMAX_DELAY) == pdTRUE)
-        {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-void vCommsTask(void *commsParameters)
-{
-    struct CommsParameters *params = (struct CommsParameters *)(commsParameters);
-    ESP_LOGI(TAG_COMMS, "Initializing communications task...");
     while (1)
     {
-        switch (params->protocol)
+        xResult = xTaskNotifyWait(pdFALSE,                /* Don't clear bits on entry. */
+                                  NOTIF_PROTOCOL_CHANGED, /* Clear notif bit on exit. */
+                                  &notifyValue,           /* Stores the notified value. */
+                                  portMAX_DELAY);
+        if (xResult == pdPASS && (notifyValue & NOTIF_PROTOCOL_CHANGED) != 0)
+        {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void vCommsTask(void *godParameters)
+{
+    ESP_LOGI(TAG_COMMS, "Initializing communications task...");
+
+    struct GodParameters *params = (struct GodParameters *)(godParameters);
+    struct CommsParameters *commsParams = (struct CommsParameters *)(params->commsParameters);
+
+    commsParams->commsData.mouseQueue = xQueueCreate(KB_QUEUE_SIZE, sizeof(struct MouseData));
+    commsParams->commsData.keyboardQueue = xQueueCreate(MOUSE_QUEUE_SIZE, sizeof(struct KeyboardData));
+
+    if (commsParams->commsData.mouseQueue == 0 || commsParams->commsData.keyboardQueue == 0)
+    {
+        ESP_LOGE(TAG_COMMS, "Failed to create queues!");
+    }
+
+    while (1)
+    {
+        switch (commsParams->protocol)
         {
         case USB:
             doUSBCommunication(params);

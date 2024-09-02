@@ -4,7 +4,7 @@
 
 struct InterconnectParameters
 {
-    struct CommsParameters *commsParameters;
+    TaskHandle_t *interconnectTask;
 };
 
-void vInterconnectTask(void *interconnectParameters);
+void vInterconnectTask(void *godParameters);

@@ -7,6 +7,7 @@
 
 #define JOYSTICK_LR_ADC ADC1_CHANNEL_7
 #define JOYSTICK_UD_ADC ADC2_CHANNEL_3
+#define JOYSTICK_BTN_ADC ADC1_CHANNEL_8  // due to PCB error
 #define JOYSTICK_BTN_GPIO GPIO_NUM_9
 
 #define KB_ROW_0_GPIO GPIO_NUM_33
@@ -28,7 +29,7 @@
 
 struct GpioParameters
 {
-    struct CommsParameters *commsParameters;
+    TaskHandle_t *gpioTask;
 };
 
-void vGpioTask(void *gpioParameters);
+void vGpioTask(void *godParameters);

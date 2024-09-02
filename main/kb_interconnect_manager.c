@@ -6,9 +6,9 @@
 
 const char *TAG_INTERCONN = "Interconnect";
 
-void vInterconnectTask(void *interconnectParameters)
+void vInterconnectTask(void *godParameters)
 {
-    struct InterconnectParameters *params = (struct InterconnectParameters*) interconnectParameters;
+    struct GodParameters *params = (struct GodParameters*) godParameters;
 
     while(1)
     {

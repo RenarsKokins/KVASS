@@ -8,6 +8,7 @@ KVASS - firmware for RKBoard split keyboard
 #include "freertos/task.h"
 #include "driver/gpio.h"
 
+#include "include/common_kvass.h"
 #include "include/comms_manager.h"
 #include "include/gpio_manager.h"
 #include "include/config_manager.h"
@@ -25,26 +26,17 @@ requirements
 */
 void app_main(void)
 {
-    static struct CommsParameters uCommsParameters = {0};
-    static struct GpioParameters uGpioParameters = {0};
-    static struct InterconnectParameters uInterconnectParameters = {0};
+    TaskStatus_t taskStatus = {0};
 
-    // Init parameters
-    uCommsParameters.protocol = USB;
-    uCommsParameters.protocolChanged = xSemaphoreCreateBinary();
-    uCommsParameters.keyboardChanged = xSemaphoreCreateBinary();
-    uCommsParameters.mouseChanged = xSemaphoreCreateBinary();
-    uCommsParameters.hidChanged = xSemaphoreCreateBinary();
-
-    uGpioParameters.commsParameters = &uCommsParameters;
-    uInterconnectParameters.commsParameters = &uCommsParameters;
+    volatile static struct GodParameters uGodParameters = {0};
+    volatile static struct GpioParameters uGpioParameters = {0};
+    volatile static struct CommsParameters uCommsParameters = {0};
+    volatile static struct InterconnectParameters uInterconnectParameters = {0};
 
     // define task handles
-    TaskHandle_t commsHandle = NULL;
     TaskHandle_t gpioHandle = NULL;
+    TaskHandle_t commsHandle = NULL;
     TaskHandle_t interconnectHandle = NULL;
-
-    TaskStatus_t taskStatus = {0};
 
     ESP_LOGI(TAG, "RKBoard initializing...");
 
@@ -56,11 +48,23 @@ void app_main(void)
         ESP_LOGE(TAG, "Cannot initialize NVS!");
     }
 
-    xTaskCreate(vCommsTask, "commsTask", CONFIG_TINYUSB_TASK_STACK_SIZE, &uCommsParameters, 9, &commsHandle);
+    // Init parameters
+    uCommsParameters.protocol = USB;
+
+    uGpioParameters.gpioTask = &gpioHandle;
+    uCommsParameters.commsTask = &commsHandle;
+    uInterconnectParameters.interconnectTask = &interconnectHandle;
+
+    uGodParameters.gpioParameters = (void*)&uGpioParameters;
+    uGodParameters.commsParameters = (void*)&uCommsParameters;
+    uGodParameters.interconnectParameters = (void*)&uInterconnectParameters;
+
+
+    xTaskCreate(vCommsTask, "commsTask", CONFIG_TINYUSB_TASK_STACK_SIZE, &uGodParameters, 9, &commsHandle);
     configASSERT(commsHandle);
-    xTaskCreate(vGpioTask, "gpioTask", 3072, &uGpioParameters, 9, &gpioHandle);
+    xTaskCreate(vGpioTask, "gpioTask", 3072, &uGodParameters, 9, &gpioHandle);
     configASSERT(gpioHandle);
-    xTaskCreate(vInterconnectTask, "interconnectTask", 3072, &uInterconnectParameters, 9, &interconnectHandle);
+    xTaskCreate(vInterconnectTask, "interconnectTask", 3072, &uGodParameters, 9, &interconnectHandle);
     configASSERT(interconnectHandle);
 
     while (1)

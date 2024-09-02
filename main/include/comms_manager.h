@@ -1,9 +1,10 @@
 #pragma once
 
 #include <stdlib.h>
-#include <semphr.h>
 
 #define KB_BUFFER_SIZE 6
+#define KB_QUEUE_SIZE 10
+#define MOUSE_QUEUE_SIZE 10
 
 enum CommsProtocol
 {
@@ -13,13 +14,14 @@ enum CommsProtocol
     NONE,
 };
 
-struct CommsData
+struct KeyboardData
 {
-    // Keyboard
     uint8_t modifier;
     uint8_t keycode[KB_BUFFER_SIZE];
+};
 
-    // Mouse
+struct MouseData
+{
     uint8_t button;
     uint8_t delta_x;
     uint8_t delta_y;
@@ -27,15 +29,18 @@ struct CommsData
     uint8_t scroll_horizontal;
 };
 
+struct CommsData
+{
+    QueueHandle_t mouseQueue;
+    QueueHandle_t keyboardQueue;
+};
+
 struct CommsParameters
 {
-    SemaphoreHandle_t protocolChanged;
-    SemaphoreHandle_t hidChanged;
-    SemaphoreHandle_t mouseChanged;
-    SemaphoreHandle_t keyboardChanged;
+    TaskHandle_t *commsTask;
 
     enum CommsProtocol protocol;
     struct CommsData commsData;
 };
 
-void vCommsTask(void *commsParameters);
+void vCommsTask(void *godParameters);

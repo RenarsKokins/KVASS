@@ -4,6 +4,7 @@
 #include "driver/adc.h"
 #include "class/hid/hid.h"
 
+#include "common_kvass.h"
 #include "gpio_manager.h"
 #include "common_utils.h"
 #include "config_manager.h"
@@ -57,52 +58,6 @@ const uint8_t rows[KB_ROWS] = {
     KB_ROW_4_GPIO,
 };
 
-void populateModifiers(uint8_t *modifier, bool press_matrix[KB_ROWS][KB_COLS], int layout)
-{
-    // Clear modifiers
-    *modifier = 0;
-
-    // Add currently pressed modifers
-    for (int i = 0; i < KB_COLS; i++)
-    {
-        for (int j = 0; j < KB_ROWS; j++)
-        {
-            if (!press_matrix[j][i])
-            {
-                continue;
-            }
-
-            switch (keyboard_layouts[layout][j][i])
-            {
-            case HID_KEY_CONTROL_LEFT:
-                *modifier = *modifier | 1;
-                break;
-            case HID_KEY_SHIFT_LEFT:
-                *modifier = *modifier | (1 << 1);
-                break;
-            case HID_KEY_ALT_LEFT:
-                *modifier = *modifier | (1 << 2);
-                break;
-            case HID_KEY_GUI_LEFT:
-                *modifier = *modifier | (1 << 3);
-                break;
-            case HID_KEY_CONTROL_RIGHT:
-                *modifier = *modifier | (1 << 4);
-                break;
-            case HID_KEY_SHIFT_RIGHT:
-                *modifier = *modifier | (1 << 5);
-                break;
-            case HID_KEY_ALT_RIGHT:
-                *modifier = *modifier | (1 << 6);
-                break;
-            case HID_KEY_GUI_RIGHT:
-                *modifier = *modifier | (1 << 7);
-                break;
-            }
-        }
-    }
-}
-
 int getCurrentLayout()
 {
     static bool initialized = false;
@@ -117,9 +72,11 @@ int getCurrentLayout()
     return side;
 }
 
-void populateKeys(uint8_t keycode[KB_BUFFER_SIZE], bool press_matrix[KB_ROWS][KB_COLS], int layout)
+void populateKeyboard(struct KeyboardData *data, bool press_matrix[KB_ROWS][KB_COLS], int layout)
 {
+    uint8_t modifier = 0;
     static List *list = NULL;
+
     if (list == NULL)
     {
         list = makeLinkedList();
@@ -132,9 +89,38 @@ void populateKeys(uint8_t keycode[KB_BUFFER_SIZE], bool press_matrix[KB_ROWS][KB
             if (press_matrix[j][i])
             {
                 // Key pressed
-                if (!existsInLL(keyboard_layouts[layout][j][i], list))
+                switch (keyboard_layouts[layout][j][i])
                 {
-                    addLLElement(keyboard_layouts[layout][j][i], list);
+                case HID_KEY_CONTROL_LEFT:
+                    modifier = modifier | 1;
+                    break;
+                case HID_KEY_SHIFT_LEFT:
+                    modifier = modifier | (1 << 1);
+                    break;
+                case HID_KEY_ALT_LEFT:
+                    modifier = modifier | (1 << 2);
+                    break;
+                case HID_KEY_GUI_LEFT:
+                    modifier = modifier | (1 << 3);
+                    break;
+                case HID_KEY_CONTROL_RIGHT:
+                    modifier = modifier | (1 << 4);
+                    break;
+                case HID_KEY_SHIFT_RIGHT:
+                    modifier = modifier | (1 << 5);
+                    break;
+                case HID_KEY_ALT_RIGHT:
+                    modifier = modifier | (1 << 6);
+                    break;
+                case HID_KEY_GUI_RIGHT:
+                    modifier = modifier | (1 << 7);
+                    break;
+                default:
+                    if (!existsInLL(keyboard_layouts[layout][j][i], list))
+                    {
+                        addLLElement(keyboard_layouts[layout][j][i], list);
+                    }
+                    break;
                 }
                 ESP_LOGW(TAG_GPIO, "Key [%d,%d] is pressed", j, i);
             }
@@ -146,21 +132,26 @@ void populateKeys(uint8_t keycode[KB_BUFFER_SIZE], bool press_matrix[KB_ROWS][KB
         }
     }
 
+    // Set keyboard data
     Node *element = list->head;
-    memset(keycode, 0, KB_BUFFER_SIZE);
+    memset(data->keycode, 0, KB_BUFFER_SIZE);
     for (int i = 0; i < KB_BUFFER_SIZE; i++)
     {
         if (element == NULL)
         {
             break;
         }
-        keycode[i] = element->data;
+        data->keycode[i] = element->data;
         element = element->next;
     }
+    data->modifier = modifier;
 }
 
-bool scanKeys(struct GpioParameters *params)
+void scanKeys(struct GodParameters *params)
 {
+    struct KeyboardData kbData = {0};
+    struct CommsParameters *commsParams = (struct CommsParameters *)params->commsParameters;
+    BaseType_t xResult;
     int level = false;
     bool changed = false;
     static bool press_matrix[KB_ROWS][KB_COLS] = {0};
@@ -175,25 +166,25 @@ bool scanKeys(struct GpioParameters *params)
             if (press_matrix[j][i] != level)
             {
                 changed = true;
+                press_matrix[j][i] = level;
             }
-            press_matrix[j][i] = level;
         }
         gpio_set_level(cols[i], 0);
     }
 
     if (changed)
     {
-        populateModifiers(&params->commsParameters->commsData.modifier, press_matrix, getCurrentLayout());
-        populateKeys(params->commsParameters->commsData.keycode, press_matrix, getCurrentLayout());
-        xSemaphoreGive(params->commsParameters->hidChanged);
-        ESP_LOGI(TAG_GPIO, "Key changed!");
+        populateKeyboard(&kbData, press_matrix, getCurrentLayout());
+        xResult = xQueueSend(commsParams->commsData.keyboardQueue, &kbData, 0);
+        xResult = xTaskNotify(*commsParams->commsTask, NOTIF_KEYB_CHANGED | NOTIF_HID_CHANGED, eSetBits);
     }
-
-    return changed;
 }
 
-void scanJoystick(struct GpioParameters *params)
+void scanJoystick(struct GodParameters *params)
 {
+    static struct MouseData mouseData = {0};
+    struct CommsParameters *commsParams = (struct CommsParameters *)params->commsParameters;
+    BaseType_t xResult;
     int btn_pressed = false;
     int raw_value_adc1 = 0, raw_value_adc2 = 0, temp_raw = 0;
 
@@ -203,15 +194,20 @@ void scanJoystick(struct GpioParameters *params)
         adc2_get_raw(JOYSTICK_UD_ADC, ADC_WIDTH_BIT_DEFAULT, &temp_raw);
         raw_value_adc2 = raw_value_adc2 + (temp_raw / JOYSTICK_SAMPLE_COUNT);
     }
+    btn_pressed = adc1_get_raw(JOYSTICK_BTN_GPIO);
 
-    btn_pressed = gpio_get_level(JOYSTICK_BTN_GPIO);
+    mouseData.button = (btn_pressed > 500) ? 1 : 0;
+    mouseData.delta_x = ((raw_value_adc1 - 2000) / 120) * 2;
 
-    ESP_LOGI(TAG_GPIO, "LR: %d, UD: %d, pressed: %d", raw_value_adc1, raw_value_adc2, btn_pressed);
+    xResult = xQueueSend(commsParams->commsData.mouseQueue, &mouseData, 0);
+    xResult = xTaskNotify(*commsParams->commsTask, NOTIF_MOUSE_CHANGED | NOTIF_HID_CHANGED, eSetBits);
+
+    // ESP_LOGI(TAG_GPIO, "LR: %d, UD: %d, pressed: %d", raw_value_adc1, raw_value_adc2, btn_pressed);
 }
 
-void vGpioTask(void *gpioParameters)
+void vGpioTask(void *godParameters)
 {
-    struct GpioParameters *params = (struct GpioParameters *)(gpioParameters);
+    struct GodParameters *params = (struct GodParameters *)(godParameters);
 
     ESP_LOGI(TAG_GPIO, "Initializing GPIO task...");
     gpio_set_direction(KB_COL_0_GPIO, GPIO_MODE_OUTPUT);
@@ -234,13 +230,14 @@ void vGpioTask(void *gpioParameters)
     gpio_set_pull_mode(KB_ROW_3_GPIO, GPIO_PULLDOWN_ONLY);
     gpio_set_pull_mode(KB_ROW_4_GPIO, GPIO_PULLDOWN_ONLY);
 
-    gpio_set_direction(JOYSTICK_BTN_GPIO, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(JOYSTICK_BTN_GPIO, GPIO_PULLUP_ONLY);
+    // gpio_set_direction(JOYSTICK_BTN_GPIO, GPIO_MODE_INPUT);
+    // gpio_set_pull_mode(JOYSTICK_BTN_GPIO, GPIO_PULLUP_ONLY);
 
     ESP_LOGI(TAG_GPIO, "GPIOs digital pins configured!");
 
     adc1_config_channel_atten(JOYSTICK_LR_ADC, ADC_ATTEN_DB_12);
-    adc2_config_channel_atten(JOYSTICK_UD_ADC, ADC_ATTEN_DB_12);
+    adc1_config_channel_atten(JOYSTICK_BTN_GPIO, ADC_ATTEN_DB_12);
+    // adc2_config_channel_atten(JOYSTICK_UD_ADC, ADC_ATTEN_DB_12);
 
     adc1_config_width(ADC_WIDTH_BIT_DEFAULT);
 
@@ -250,6 +247,6 @@ void vGpioTask(void *gpioParameters)
     {
         scanKeys(params);
         scanJoystick(params);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
